@@ -8,11 +8,14 @@ SAMPLES = ['BM19_64_6_UMI_S75', 'BM19_65_4_UMI_S76', 'BM19_65_6_UMI_S77',
            'BM19_71_6_UMI_S91', 'BM19_73_1_UMI_S92', 'BM19_73_2_UMI_S93', 
            'BM19_73_3_UMI_S94', 'BM19_73_4_UMI_S95', 'BM19_73_5_UMI_S96', 
            'BM19_73_6_UMI_S97', 'BM19_74_1_UMI_S98', 'BM19_74_2_UMI_S99', 
-           'BM19_74_3_UMI_S100', 'BM19_74_4_UMI_S101', 'BMCHAR_IN_UMI_S112']
+           'BM19_74_3_UMI_S100', 'BM19_74_4_UMI_S101', 'BMCHAR_IN_UMI_S112',
+           'BMRC1_2_UMI_S102', 'BMRC19_5_UMI_S105', 'BMRC19_2_UMI_S103',  
+           'BMRC24_2_UMI_S104']
 
 rule all:
    input:
-       expand('outputs/dedup/{sample}.dedup.bam', sample = SAMPLES)
+       "outputs/counts/raw_counts.tsv",
+       expand("outputs/gather/{sample}_gather.csv", sample = SAMPLES)
 
 rule umi_extract:
     input: "inputs/raw/{sample}_L003_R1_001.fastq.gz"
@@ -127,11 +130,74 @@ rule dedup_UMI:
     umi_tools dedup -I {input.bam} --output-stats=deduplicated -S {output}
     '''
 
-#rule htseq_count:?
-#    # v0.6.0
-#    shell:'''
-#    htseq-count -m intersection-nonempty -s yes -f bam -r pos $bam {input.gtf} > $bam_dir/read_counts.txt
-#    '''
+rule htseq_count:
+    input:
+        bam = 'outputs/dedup/{sample}.dedup.bam',
+        gtf = 'inputs/genome/GCF_000146045.2_R64_genomic.gtf'
+    output: "outputs/htseq/{sample}_readcounts.txt"
+    conda: "envs/htseq.yml"
+    shell:'''
+    htseq-count -m intersection-nonempty -s yes -f bam -r pos {input.bam} {input.gtf} > {output}
+    '''
+
+rule make_counts:
+    input: expand("outputs/htseq/{sample}_readcounts.txt", sample = SAMPLES)
+    output: "outputs/counts/raw_counts.tsv"
+    conda: "envs/tidyverse.yml"
+    script: "scripts/make_raw_counts.R"
+
+################################################
+## Sourmash characterization
+################################################
+
+rule sourmash_compute:
+    input: "outputs/bbduk/{sample}.fq"
+    output: "outputs/sigs/{sample}.sig"
+    conda: "envs/sourmash.yml"
+    shell:'''
+    sourmash compute -k 21,31,51 --track-abundance --scaled 2000 -o {output} {input}
+    '''
+
+rule download_gather_genbank:
+    output: "inputs/gather_databases/genbank-d2-k31.tar.gz"
+    shell:'''
+    wget -O {output} https://s3-us-west-2.amazonaws.com/sourmash-databases/2018-03-29/genbank-d2-k31.tar.gz
+    '''
+
+rule untar_genbank:
+    output: "inputs/gather_databases/genbank-d2-k31.sbt.json"
+    input:  "inputs/gather_databases/genbank-d2-k31.tar.gz"
+    params: outdir = "inputs/gather_databases"
+    shell: '''
+    tar xf {input} -C {params.outdir}
+    '''
 
 
-#rule deseq2
+rule download_gather_rna:
+    output: "inputs/gather_databases/euk_rna_k31.tar.gz"
+    shell:'''
+    wget -O {output} https://osf.io/qk5th/download
+    '''
+
+rule untar_rna:
+    output: "inputs/gather_databases/euk_rna_k31.sbt.json"
+    input:  "inputs/gather_databases/euk_rna_k31.tar.gz"
+    params: outdir = "inputs/gather_databases"
+    shell: '''
+    tar xf {input} -C {params.outdir}
+    '''
+
+rule sourmash_gather:
+    input: 
+        sig="outputs/sigs/{sample}.sig",
+        rc212="inputs/gather_databases/rc212.sig",
+        db1="inputs/gather_databases/euk_rna_k31.sbt.json",
+        db2="inputs/gather_databases/genbank-d2-k31.sbt.json",
+    output:
+        csv="outputs/gather/{sample}_gather.csv",
+        matches="outputs/gather/{sample}_matches.sig",
+        un="outputs/gather/{sample}_un.sig"
+    conda: 'envs/sourmash.yml'
+    shell:'''
+    sourmash gather -o {output.csv} --save-matches {output.matches} --output-unassigned {output.un} --scaled 2000 -k 31 {input.sig} {input.rc212} {input.db1} {input.db2}
+    '''
